@@ -12,6 +12,10 @@ The system is built on three principles:
 - **Explicit tool mediation** — no action is taken without passing through the tool registry.
 - **Minimal attack surface** — each layer knows as little as necessary about the others.
 
+<p style="text-align: center;">
+    <img src="https://github.com/user-attachments/assets/70004a9b-1e7e-46b8-a2c5-84e5b9ad2e8d" style="max-width: 100%; height: auto;">
+</p>
+
 ---
 
 ## Architecture
