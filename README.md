@@ -72,9 +72,10 @@ This enforces:
 
 ## Prerequisites
 
-* Linux (Unix Domain Sockets and Docker required; WSL2 is supported)
+* Linux or WSL2 (Windows Subsystem for Linux)
+* **x86_64 Architecture** (ARM64/Apple Silicon is not supported in v0.1.0)
 * Python 3.11+
-* Docker
+* Docker or Podman
 * Ollama (for local inference) or an API key for a cloud provider
 * Zig 0.15.2 (development builds only — `install_dev.sh` handles this automatically)
 
