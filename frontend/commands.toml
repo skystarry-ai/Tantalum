@@ -1,0 +1,44 @@
+# Tantalum Slash Command Registry
+# Copyright 2026 Skystarry-AI
+# SPDX-License-Identifier: Apache-2.0
+#
+# Each [[command]] block defines one slash command.
+#
+# Fields:
+#   name        (str, required) -- primary command string including the leading slash
+#   description (str, required) -- short description shown in the autocomplete menu
+#   aliases     (str[], optional) -- alternate command strings that map to the same handler
+#
+# Handler keys (the "name" field without "/") must be implemented in COMMAND_HANDLERS
+# inside cli.py. Adding a new entry here without a corresponding handler will cause
+# the CLI to print an "Unknown command" notice at runtime rather than crashing.
+
+[[command]]
+name        = "/exit"
+description = "Exit Tantalum"
+
+[[command]]
+name        = "/quit"
+description = "Exit Tantalum (alias for /exit)"
+aliases     = ["/exit"]
+
+[[command]]
+name        = "/clean"
+description = "Clear the terminal screen"
+
+[[command]]
+name        = "/clear"
+description = "Clear the terminal screen (alias for /clean)"
+aliases     = ["/clean"]
+
+[[command]]
+name        = "/config"
+description = "Open the config file in $EDITOR"
+
+[[command]]
+name        = "/reload"
+description = "Reload config and restart the brain (clears KV cache)"
+
+[[command]]
+name        = "/newchat"
+description = "Start a new chat session (resets conversation context)"

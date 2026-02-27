@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tantalum"
+version = "0.1.0"
+description = "Tantalum CLI and Agent"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "chromadb>=1.5.1",
+    "litellm>=1.81.15",
+    "python-dotenv>=1.2.1",
+    "prompt-toolkit>=3.0.0",
+    "rich>=13.0.0"
+]
+
+[project.scripts]
+tantalum = "frontend.cli:main"
+
+[tool.setuptools]
+packages = ["frontend", "service"]
+
+[tool.setuptools.package-data]
+"service" = ["*"]
+"frontend" = ["commands.toml"]
