@@ -19,12 +19,16 @@ import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 
 import chromadb
 import litellm
 from chromadb.utils import embedding_functions
+from dotenv import load_dotenv
 
-# --- Runtime Detection ---
+# ---------------------------------------------------------------------------
+# Runtime Detection
+# ---------------------------------------------------------------------------
 
 def _detect_runtime() -> str:
     """
@@ -39,11 +43,12 @@ def _detect_runtime() -> str:
         "No container runtime found. Install Podman (recommended) or Docker."
     )
 
-# --- Configuration & Constants ---
-BRAIN_SOCKET_PATH = "/tmp/tantalum-brain.sock"
-MODEL = os.environ.get("TANTALUM_MODEL", "gemini/gemini-2.5-flash")
-SYSTEM_PROMPT = os.environ.get(
-    "TANTALUM_SYSTEM_PROMPT",
+
+# ---------------------------------------------------------------------------
+# Configuration Dataclass
+# ---------------------------------------------------------------------------
+
+_DEFAULT_SYSTEM_PROMPT = (
     "You are Tantalum, a zero-trust AI agent assistant. Be concise and helpful. "
     "Your first philosophy/principle is \"A good agent should want boundaries.\""
     "You have access to these tools ONLY for specific tasks: run_python, run_shell, read_file, write_file. "
@@ -53,98 +58,146 @@ SYSTEM_PROMPT = os.environ.get(
     "When you proceed with multi-level reasoning, you should decompose the given query and infer what the user wants through the previous context."
     "After reaching a conclusion, verify your reasoning by working backwards: does each step logically support the final answer?"
     "NEVER call tools that are not in this list. "
-    "Never return an empty response after tool use.",
+    "Never return an empty response after tool use."
 )
-LOOKBACK_BLOCK_LIMIT = 18
-TOOL_RAG_TOP_K = 3
 
-DOCKER_VOLUME = os.environ.get("TANTALUM_VOLUME", "tantalum-storage")
-DOCKER_IMAGE = os.environ.get("TANTALUM_DOCKER_IMAGE", "python:3.12-slim")
-DOCKER_MEMORY = os.environ.get("TANTALUM_DOCKER_MEMORY", "256m")
-DOCKER_CPUS = os.environ.get("TANTALUM_DOCKER_CPUS", "0.5")
-DOCKER_TIMEOUT = int(os.environ.get("TANTALUM_DOCKER_TIMEOUT", "30"))
-PERSISTENT_CONTAINER = "tantalum-persistent"
-CONTAINER_RUNTIME = os.environ.get("TANTALUM_RUNTIME", _detect_runtime())
 
-# Gemini prompt cache TTL in seconds (1 hour default)
-GEMINI_CACHE_TTL = os.environ.get("TANTALUM_GEMINI_CACHE_TTL", "3600s")
+@dataclass
+class BrainConfig:
+    """
+    All runtime-configurable settings for the Brain process.
+
+    Every field maps to a TANTALUM_* environment variable and is populated
+    by BrainConfig.from_env() after load_dotenv() has run.  Keeping config
+    in a single dataclass makes it easy to pass around, inspect, and test
+    without relying on global state or os.environ at call sites.
+    """
+
+    # LLM settings
+    model: str = "gemini/gemini-2.5-flash"
+    system_prompt: str = field(default=_DEFAULT_SYSTEM_PROMPT)
+    gemini_cache_ttl: str = "3600s"
+
+    # Conversation settings
+    lookback_block_limit: int = 18
+    tool_rag_top_k: int = 3
+
+    # Container settings
+    runtime: str = field(default_factory=_detect_runtime)
+    volume: str = "tantalum-storage"
+    image: str = "python:3.12-slim"
+    memory: str = "256m"
+    cpus: str = "0.5"
+    timeout: int = 30
+    persistent_container: str = "tantalum-persistent"
+
+    # Socket path
+    socket_path: str = "/tmp/tantalum-brain.sock"
+
+    @classmethod
+    def from_env(cls) -> "BrainConfig":
+        """
+        Construct a BrainConfig from environment variables.
+
+        Must be called after load_dotenv() so that values from config.env
+        are already present in os.environ.
+        """
+        return cls(
+            model=os.environ.get("TANTALUM_MODEL", "gemini/gemini-2.5-flash"),
+            system_prompt=os.environ.get("TANTALUM_SYSTEM_PROMPT", _DEFAULT_SYSTEM_PROMPT),
+            gemini_cache_ttl=os.environ.get("TANTALUM_GEMINI_CACHE_TTL", "3600s"),
+            lookback_block_limit=int(os.environ.get("TANTALUM_LOOKBACK_LIMIT", "18")),
+            tool_rag_top_k=int(os.environ.get("TANTALUM_TOOL_RAG_TOP_K", "3")),
+            runtime=os.environ.get("TANTALUM_RUNTIME", _detect_runtime()),
+            volume=os.environ.get("TANTALUM_VOLUME", "tantalum-storage"),
+            image=os.environ.get("TANTALUM_DOCKER_IMAGE", "python:3.12-slim"),
+            memory=os.environ.get("TANTALUM_DOCKER_MEMORY", "256m"),
+            cpus=os.environ.get("TANTALUM_DOCKER_CPUS", "0.5"),
+            timeout=int(os.environ.get("TANTALUM_DOCKER_TIMEOUT", "30")),
+            persistent_container=os.environ.get("TANTALUM_PERSISTENT_CONTAINER", "tantalum-persistent"),
+            socket_path=os.environ.get("TANTALUM_SOCKET_PATH", "/tmp/tantalum-brain.sock"),
+        )
 
 
 # ---------------------------------------------------------------------------
 # Persistent Container Management
 # ---------------------------------------------------------------------------
 
-def ensure_persistent_container() -> None:
+def ensure_persistent_container(cfg: BrainConfig) -> None:
     """
-    Ensure the persistent Docker container is running for storage operations.
-    If it is not running, it initializes a new volume and starts the container.
+    Ensure the persistent container is running for storage operations.
+    If it is not running, initializes a new volume and starts the container.
     """
     result = subprocess.run(
-        [CONTAINER_RUNTIME, "inspect", "--format", "{{.State.Running}}", PERSISTENT_CONTAINER],
+        [cfg.runtime, "inspect", "--format", "{{.State.Running}}", cfg.persistent_container],
         capture_output=True,
         text=True,
     )
 
     if result.returncode == 0 and result.stdout.strip() == "true":
-        print(f"[Brain] Persistent container '{PERSISTENT_CONTAINER}' is already running.")
+        print(f"[Brain] Persistent container '{cfg.persistent_container}' is already running.")
         return
 
     # Remove existing container if it's in a stopped/broken state
-    subprocess.run([CONTAINER_RUNTIME, "rm", "-f", PERSISTENT_CONTAINER], capture_output=True)
+    subprocess.run([cfg.runtime, "rm", "-f", cfg.persistent_container], capture_output=True)
 
     # Create volume if it doesn't exist
-    subprocess.run([CONTAINER_RUNTIME, "volume", "create", DOCKER_VOLUME], capture_output=True)
+    subprocess.run([cfg.runtime, "volume", "create", cfg.volume], capture_output=True)
 
     subprocess.run(
         [
-            CONTAINER_RUNTIME, "run", "-d",
-            "--name", PERSISTENT_CONTAINER,
-            "--memory", DOCKER_MEMORY,
-            "--cpus", DOCKER_CPUS,
-            "-v", f"{DOCKER_VOLUME}:/storage:rw",
-            DOCKER_IMAGE,
+            cfg.runtime, "run", "-d",
+            "--name", cfg.persistent_container,
+            "--memory", cfg.memory,
+            "--cpus", cfg.cpus,
+            "-v", f"{cfg.volume}:/storage:rw",
+            cfg.image,
             "sleep", "infinity",
         ],
         check=True,
     )
-    print(f"[Brain] Persistent container '{PERSISTENT_CONTAINER}' started.")
+    print(f"[Brain] Persistent container '{cfg.persistent_container}' started.")
 
 
 # ---------------------------------------------------------------------------
 # Session Container Execution
 # ---------------------------------------------------------------------------
 
-def run_in_session_container(command: list[str], workspace: str) -> str:
+def run_in_session_container(
+    command: list[str],
+    workspace: str,
+    cfg: BrainConfig,
+) -> str:
     """
-    Run a command inside an ephemeral, network-isolated Docker container.
+    Run a command inside an ephemeral, network-isolated container.
 
     Args:
-        command: The shell command/executable and its arguments.
-        workspace: Path to the local workspace directory to mount.
+        command:   The executable and its arguments.
+        workspace: Local directory mounted as /workspace inside the container.
+        cfg:       Active BrainConfig instance.
 
     Returns:
-        Standard output or standard error of the execution.
+        Combined stdout/stderr of the execution, or "(no output)".
     """
-    session_id = uuid.uuid4().hex[:8]
-    container_name = f"tantalum-session-{session_id}"
+    container_name = f"tantalum-session-{uuid.uuid4().hex[:8]}"
 
     docker_cmd = [
-        CONTAINER_RUNTIME, "run", "--rm",
+        cfg.runtime, "run", "--rm",
         "--name", container_name,
         "--network", "none",
-        "--memory", DOCKER_MEMORY,
-        "--cpus", DOCKER_CPUS,
+        "--memory", cfg.memory,
+        "--cpus", cfg.cpus,
         "--workdir", "/workspace",
         "-v", f"{workspace}:/workspace:rw",
-        "-v", f"{DOCKER_VOLUME}:/storage:ro",
-        DOCKER_IMAGE,
+        "-v", f"{cfg.volume}:/storage:ro",
+        cfg.image,
     ] + command
 
     result = subprocess.run(
         docker_cmd,
         capture_output=True,
         text=True,
-        timeout=DOCKER_TIMEOUT,
+        timeout=cfg.timeout,
     )
     return result.stdout or result.stderr or "(no output)"
 
@@ -153,7 +206,7 @@ def run_in_session_container(command: list[str], workspace: str) -> str:
 # Tool Registry
 # ---------------------------------------------------------------------------
 
-TOOL_REGISTRY = [
+TOOL_REGISTRY: list[dict] = [
     {
         "name": "run_python",
         "description": "Execute a Python code snippet in an isolated Docker container and return stdout/stderr.",
@@ -194,7 +247,7 @@ TOOL_REGISTRY = [
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Path relative to /storage"},
-                "content": {"type": "string", "description": "Content to write"}
+                "content": {"type": "string", "description": "Content to write"},
             },
             "required": ["path", "content"],
         },
@@ -202,11 +255,21 @@ TOOL_REGISTRY = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Model Family Detection & Tool Formatting
+# ---------------------------------------------------------------------------
+
 def _get_model_family(model: str) -> str:
     """
     Detect the model provider family from the model string prefix.
 
-    Returns one of: "anthropic", "gemini", "openai", "unknown".
+    Returns one of: "anthropic", "gemini", "openai", "ollama", "unknown".
+
+    Ollama models are exposed via an OpenAI-compatible endpoint through
+    litellm (ollama/ or ollama_chat/ prefix).  They do not support explicit
+    cache_control markup, but the serving runtime (llama.cpp / ollama)
+    handles KV caching internally as long as the system prompt prefix
+    remains stable across turns — identical behaviour to the OpenAI path.
     """
     m = model.lower()
     if m.startswith("anthropic/") or m.startswith("claude"):
@@ -215,28 +278,22 @@ def _get_model_family(model: str) -> str:
         return "gemini"
     if m.startswith("openai/") or m.startswith("gpt") or m.startswith("o1") or m.startswith("o3"):
         return "openai"
+    if m.startswith("ollama/") or m.startswith("ollama_chat/"):
+        return "ollama"
     return "unknown"
 
 
-def to_litellm_tool(tool: dict, model: str = MODEL) -> dict:
+def to_litellm_tool(tool: dict, family: str) -> dict:
     """
     Convert a tool registry entry into the provider-appropriate format for LiteLLM.
 
-    - Anthropic: uses {"type": "function", "function": {...}} with optional
-      cache_control on the last tool to enable prompt caching for the tool list.
-    - Gemini: same OpenAI-style function spec; litellm handles translation internally.
-    - OpenAI: standard OpenAI function calling spec with strict mode enabled.
-    - Unknown: falls back to the OpenAI spec.
-
     Args:
-        tool: A dict from TOOL_REGISTRY.
-        model: The active model string (used to select the correct format).
+        tool:   A dict from TOOL_REGISTRY.
+        family: Provider family string from _get_model_family().
 
     Returns:
-        A dict formatted for the target provider via litellm.
+        A provider-formatted tool dict.
     """
-    family = _get_model_family(model)
-
     if family == "openai":
         # OpenAI function calling with strict JSON schema enforcement
         return {
@@ -261,26 +318,26 @@ def to_litellm_tool(tool: dict, model: str = MODEL) -> dict:
     }
 
 
-def build_tools_for_request(tools: list[dict], model: str = MODEL) -> list[dict]:
+def build_tools_for_request(tools: list[dict], cfg: BrainConfig) -> list[dict]:
     """
     Convert a list of tool registry entries for the active provider.
 
-    For Anthropic models, attach cache_control to the last tool definition so
-    that the entire tool list is eligible for prompt caching.
+    For Anthropic models, attaches cache_control to the last tool definition
+    so that the entire tool list is eligible for prompt caching.
 
     Args:
         tools: List of dicts from TOOL_REGISTRY.
-        model: The active model string.
+        cfg:   Active BrainConfig instance.
 
     Returns:
         A list of provider-formatted tool dicts ready for the litellm call.
     """
-    formatted = [to_litellm_tool(t, model) for t in tools]
+    family = _get_model_family(cfg.model)
+    formatted = [to_litellm_tool(t, family) for t in tools]
 
-    if _get_model_family(model) == "anthropic" and formatted:
-        # Mark the last tool so the full tool block is cached by Anthropic.
-        last = formatted[-1]
-        last["cache_control"] = {"type": "ephemeral"}
+    if family == "anthropic" and formatted:
+        # Mark the last tool so the full tool block is cached by Anthropic
+        formatted[-1]["cache_control"] = {"type": "ephemeral"}
 
     return formatted
 
@@ -308,25 +365,29 @@ def init_tool_db() -> chromadb.Collection:
     return collection
 
 
-def search_tools(collection: chromadb.Collection, query: str, k: int = TOOL_RAG_TOP_K) -> list[dict]:
+def search_tools(
+    collection: chromadb.Collection,
+    query: str,
+    cfg: BrainConfig,
+) -> list[dict]:
     """
     Retrieve the top K most relevant tools for a given user query.
     """
-    results = collection.query(query_texts=[query], n_results=min(k, len(TOOL_REGISTRY)))
-    matched_names = [m["name"] for m in results["metadatas"][0]]
-
-    # Filter original registry to return full tool definitions
-    matched = [t for t in TOOL_REGISTRY if t["name"] in matched_names]
-    return matched
+    results = collection.query(
+        query_texts=[query],
+        n_results=min(cfg.tool_rag_top_k, len(TOOL_REGISTRY)),
+    )
+    matched_names = {m["name"] for m in results["metadatas"][0]}
+    return [t for t in TOOL_REGISTRY if t["name"] in matched_names]
 
 
 # ---------------------------------------------------------------------------
 # Tool Executor
 # ---------------------------------------------------------------------------
 
-def execute_tool(name: str, arguments: str) -> str:
+def execute_tool(name: str, arguments: str, cfg: BrainConfig) -> str:
     """
-    Parse arguments and execute the specified tool, safely running it in Docker.
+    Parse arguments and execute the specified tool inside a container.
     """
     try:
         args = json.loads(arguments)
@@ -342,16 +403,16 @@ def execute_tool(name: str, arguments: str) -> str:
             code_file = os.path.join(workspace, "run.py")
             with open(code_file, "w") as f:
                 f.write(code)
-            output = run_in_session_container(["python3", "/workspace/run.py"], workspace)
+            output = run_in_session_container(["python3", "/workspace/run.py"], workspace, cfg)
 
         elif name == "run_shell":
             command = args.get("command", "")
-            output = run_in_session_container(["sh", "-c", command], workspace)
+            output = run_in_session_container(["sh", "-c", command], workspace, cfg)
 
         elif name == "read_file":
             path = args.get("path", "").lstrip("/")
             result = subprocess.run(
-                [CONTAINER_RUNTIME, "exec", PERSISTENT_CONTAINER, "cat", f"/storage/{path}"],
+                [cfg.runtime, "exec", cfg.persistent_container, "cat", f"/storage/{path}"],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -363,8 +424,8 @@ def execute_tool(name: str, arguments: str) -> str:
             file_content = args.get("content", "")
             result = subprocess.run(
                 [
-                    CONTAINER_RUNTIME, "exec", "-i", PERSISTENT_CONTAINER, "sh", "-c",
-                    f"mkdir -p $(dirname /storage/{path}) && cat > /storage/{path}"
+                    cfg.runtime, "exec", "-i", cfg.persistent_container, "sh", "-c",
+                    f"mkdir -p $(dirname /storage/{path}) && cat > /storage/{path}",
                 ],
                 input=file_content,
                 capture_output=True,
@@ -372,6 +433,7 @@ def execute_tool(name: str, arguments: str) -> str:
                 timeout=10,
             )
             output = f"Written to /storage/{path}" if result.returncode == 0 else result.stderr
+
         else:
             output = f"Error: Unknown tool '{name}'"
 
@@ -387,54 +449,52 @@ def execute_tool(name: str, arguments: str) -> str:
 # System Message Builder (per-provider prompt caching)
 # ---------------------------------------------------------------------------
 
-def build_system_message(model: str = MODEL) -> dict:
+def build_system_message(cfg: BrainConfig) -> dict:
     """
     Construct the system message with provider-appropriate prompt caching markup.
 
     Caching strategy per provider:
-      - Anthropic: cache_control block attached to the text part (charges for
-        cache writes, then reads are discounted).
-      - Gemini: cache_control with TTL in the content part (Google AI Studio
-        supports ephemeral context caching via litellm).
+      - Anthropic: cache_control block on the text part (charges for cache
+        writes; subsequent reads are discounted).
+      - Gemini: cache_control with TTL (Google AI Studio ephemeral caching
+        via litellm).
       - OpenAI: automatic server-side caching for prompts >= 1024 tokens;
         no annotation required.
-      - Unknown: plain string content, no caching markup.
+      - Ollama: OpenAI-compatible endpoint; KV caching is handled internally
+        by the serving runtime as long as the system prompt prefix is stable.
+      - Unknown: plain string fallback.
 
     Args:
-        model: The active model string.
+        cfg: Active BrainConfig instance.
 
     Returns:
-        A dict representing the system message ready for the messages list.
+        A system message dict ready for the messages list.
     """
-    family = _get_model_family(model)
+    family = _get_model_family(cfg.model)
 
     if family == "anthropic":
-        # Anthropic explicit cache_control on the system prompt text block.
         content = [
             {
                 "type": "text",
-                "text": SYSTEM_PROMPT,
+                "text": cfg.system_prompt,
                 "cache_control": {"type": "ephemeral"},
             }
         ]
 
     elif family == "gemini":
-        # Gemini supports cache_control with an optional TTL via litellm.
         content = [
             {
                 "type": "text",
-                "text": SYSTEM_PROMPT,
+                "text": cfg.system_prompt,
                 "cache_control": {
                     "type": "ephemeral",
-                    "ttl": GEMINI_CACHE_TTL,
+                    "ttl": cfg.gemini_cache_ttl,
                 },
             }
         ]
 
     else:
-        # OpenAI: caching is automatic for large prompts; plain string is fine.
-        # Unknown providers: safe fallback with no markup.
-        content = SYSTEM_PROMPT
+        content = cfg.system_prompt
 
     return {"role": "system", "content": content}
 
@@ -443,17 +503,25 @@ def build_system_message(model: str = MODEL) -> dict:
 # LLM Integration
 # ---------------------------------------------------------------------------
 
-
-def call_llm_with_tools(messages: list[dict], tools: list[dict]) -> str:
+def call_llm_with_tools(
+    messages: list[dict],
+    tools: list[dict],
+    cfg: BrainConfig,
+) -> str:
     """
-    Call the LLM using LiteLLM, passing the conversation history and available tools.
-    Handles tool calls internally and returns the final response.
+    Call the LLM via LiteLLM, handle tool calls, and return the final response.
 
-    Tool format is selected per-provider via build_tools_for_request().
+    Args:
+        messages: Full message list (system message + conversation history).
+        tools:    Relevant tool registry entries for this turn.
+        cfg:      Active BrainConfig instance.
+
+    Returns:
+        The final assistant response string.
     """
-    litellm_tools = build_tools_for_request(tools, MODEL) if tools else None
+    litellm_tools = build_tools_for_request(tools, cfg) if tools else None
 
-    response = litellm.completion(model=MODEL, messages=messages, tools=litellm_tools)
+    response = litellm.completion(model=cfg.model, messages=messages, tools=litellm_tools)
     msg = response.choices[0].message
 
     if not msg.tool_calls:
@@ -461,40 +529,40 @@ def call_llm_with_tools(messages: list[dict], tools: list[dict]) -> str:
 
     valid_tool_names = {t["name"] for t in tools}
 
-    # Fallback to standard completion if model hallucinates an invalid tool name
+    # Fallback to plain completion if the model hallucinates an invalid tool name
     if any(tc.function.name not in valid_tool_names for tc in msg.tool_calls):
-        fallback = litellm.completion(model=MODEL, messages=messages)
+        fallback = litellm.completion(model=cfg.model, messages=messages)
         return fallback.choices[0].message.content or "(no response)"
 
     messages.append(msg)
 
     # Execute all tools requested by the LLM
     for tool_call in msg.tool_calls:
-        result = execute_tool(tool_call.function.name, tool_call.function.arguments)
+        result = execute_tool(tool_call.function.name, tool_call.function.arguments, cfg)
         messages.append({
             "role": "tool",
             "tool_call_id": tool_call.id,
             "content": result,
         })
 
-    # Get the final synthesis after tool execution
-    final_response = litellm.completion(model=MODEL, messages=messages, tools=litellm_tools)
-    return final_response.choices[0].message.content or "(no response)"
+    # Final synthesis after tool results are appended
+    final = litellm.completion(model=cfg.model, messages=messages, tools=litellm_tools)
+    return final.choices[0].message.content or "(no response)"
 
 
 # ---------------------------------------------------------------------------
 # Lookback Monitor
 # ---------------------------------------------------------------------------
 
-def apply_lookback_monitor(history: list[dict]) -> list[dict]:
+def apply_lookback_monitor(history: list[dict], cfg: BrainConfig) -> list[dict]:
     """
-    Injects a cache breakpoint into the conversation history to optimize
-    context window handling for long conversations.
+    Inject a cache breakpoint marker into long conversation histories to keep
+    the active context window within cfg.lookback_block_limit turns.
     """
-    if len(history) <= LOOKBACK_BLOCK_LIMIT:
+    if len(history) <= cfg.lookback_block_limit:
         return history
 
-    inject_idx = len(history) - LOOKBACK_BLOCK_LIMIT
+    inject_idx = len(history) - cfg.lookback_block_limit
     marker = {"role": "system", "content": "[CACHE_BREAKPOINT]"}
 
     if history[inject_idx] == marker:
@@ -535,18 +603,26 @@ def recv_fd(sock: socket.socket) -> int | None:
 
 def write_jsonl(conn: socket.socket, obj: dict) -> None:
     """Write a dictionary as a JSON Line to the socket."""
-    line = json.dumps(obj, ensure_ascii=False) + "\n"
-    conn.sendall(line.encode("utf-8"))
+    conn.sendall((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
 # Session Handler
 # ---------------------------------------------------------------------------
 
-def handle_session(conn: socket.socket, tool_collection: chromadb.Collection) -> None:
+def handle_session(
+    conn: socket.socket,
+    tool_collection: chromadb.Collection,
+    cfg: BrainConfig,
+) -> None:
     """
     Handle an active communication session with the frontend.
     Processes user messages, manages conversation history, and invokes the LLM.
+
+    Args:
+        conn:            Connected client socket.
+        tool_collection: Initialised ChromaDB tool collection.
+        cfg:             Active BrainConfig instance.
     """
     history: list[dict] = []
     rfile = conn.makefile("rb")
@@ -569,26 +645,21 @@ def handle_session(conn: socket.socket, tool_collection: chromadb.Collection) ->
             # Handle reset command
             if content == "/newchat":
                 history.clear()
-                write_jsonl(
-                    conn,
-                    {
-                        "role": "assistant",
-                        "content": "New chat session started. Context has been cleared.",
-                        "done": True,
-                    }
-                )
+                write_jsonl(conn, {
+                    "role": "assistant",
+                    "content": "New chat session started. Context has been cleared.",
+                    "done": True,
+                })
                 continue
 
             history.append({"role": "user", "content": content})
-            history = apply_lookback_monitor(history)
+            history = apply_lookback_monitor(history, cfg)
 
-            # Build provider-aware system message with prompt caching markup
-            system_msg = build_system_message(MODEL)
-
-            relevant_tools = search_tools(tool_collection, content)
+            system_msg = build_system_message(cfg)
+            relevant_tools = search_tools(tool_collection, content, cfg)
             messages = [system_msg] + history
 
-            response_text = call_llm_with_tools(messages, relevant_tools)
+            response_text = call_llm_with_tools(messages, relevant_tools, cfg)
             history.append({"role": "assistant", "content": response_text})
 
             write_jsonl(conn, {"role": "assistant", "content": response_text, "done": True})
@@ -599,41 +670,59 @@ def handle_session(conn: socket.socket, tool_collection: chromadb.Collection) ->
         rfile.close()
 
 
-def handle_connection(client_sock: socket.socket, tool_collection: chromadb.Collection) -> None:
-    """Handle incoming connection and extract file descriptor."""
+def handle_connection(
+    client_sock: socket.socket,
+    tool_collection: chromadb.Collection,
+    cfg: BrainConfig,
+) -> None:
+    """Handle an incoming UDS connection and extract the forwarded file descriptor."""
     try:
         fd = recv_fd(client_sock)
         if fd is not None:
             with fd_as_socket(fd) as conn:
-                handle_session(conn, tool_collection)
+                handle_session(conn, tool_collection, cfg)
     finally:
         client_sock.close()
 
 
+# ---------------------------------------------------------------------------
+# Entry Point
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     """Main execution loop for Tantalum Brain."""
-    if os.path.exists(BRAIN_SOCKET_PATH):
-        os.unlink(BRAIN_SOCKET_PATH)
+    # Resolve config.env path, then load it before building BrainConfig so
+    # that all os.environ.get() calls inside from_env() see the user's settings.
+    config_file = (
+        os.environ.get("TANTALUM_CONFIG")
+        or os.path.expanduser("~/.config/tantalum/config.env")
+    )
+    load_dotenv(config_file, override=True)
 
-    ensure_persistent_container()
+    cfg = BrainConfig.from_env()
+
+    if os.path.exists(cfg.socket_path):
+        os.unlink(cfg.socket_path)
+
+    ensure_persistent_container(cfg)
     tool_collection = init_tool_db()
 
     server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server_sock.bind(BRAIN_SOCKET_PATH)
+    server_sock.bind(cfg.socket_path)
     server_sock.listen(16)
 
-    family = _get_model_family(MODEL)
+    family = _get_model_family(cfg.model)
     print(f"[Brain] Running with prompt caching enabled (provider: {family}).")
-    print(f"[Brain] Target Model: {MODEL}")
-    print(f"[Brain] Container Runtime: {CONTAINER_RUNTIME}")
-    print(f"[Brain] Listening on {BRAIN_SOCKET_PATH}...")
+    print(f"[Brain] Target Model: {cfg.model}")
+    print(f"[Brain] Container Runtime: {cfg.runtime}")
+    print(f"[Brain] Listening on {cfg.socket_path}...")
 
     while True:
         client_sock, _ = server_sock.accept()
         threading.Thread(
             target=handle_connection,
-            args=(client_sock, tool_collection),
-            daemon=True
+            args=(client_sock, tool_collection, cfg),
+            daemon=True,
         ).start()
 
 
