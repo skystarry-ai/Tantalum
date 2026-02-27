@@ -167,7 +167,7 @@ cython_debug/
 .idea/
 
 ### Project Files
-# service/
+service/
 skills/
 .gemini/
 AGENTS.md
