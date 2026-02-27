@@ -28,7 +28,7 @@ if [[ "$OSTYPE" != "linux-gnu"* ]]; then
 fi
 
 ARCH=$(uname -m)
-if [[ "$ARCH" != "x86_64" && "$ARCH" != "aarch64" ]]; then
+if [[ "$ARCH" != "x86_64" ]]; then
     error "Unsupported architecture: $ARCH"
 fi
 
