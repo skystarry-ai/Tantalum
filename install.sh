@@ -10,7 +10,8 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 DIM='\033[2m'
 RESET='\033[0m'
-gateway_file="https://github.com/skystarry-ai/Tantalum/releases/latest/download/tantalum-gateway"
+
+VERSION="0.1.0"
 
 info()    { echo -e "${CYAN}●${RESET} $1"; }
 success() { echo -e "${GREEN}✓${RESET} $1"; }
@@ -98,9 +99,24 @@ else
     success "Pipx installed and PATH updated for this session"
 fi
 
-info "Downloading a gateway file..."
-mkdir -p service
-wget "${gateway_file}" -o service/tantalum-gateway
+# ---------------------------------------------------------------------------
+# Download Gateway Binary
+# ---------------------------------------------------------------------------
+info "Downloading Tantalum Gateway v${VERSION}..."
+
+GATEWAY_DIR="service"
+GATEWAY_BIN="${GATEWAY_DIR}/tantalum-gateway"
+DOWNLOAD_URL="https://github.com/skystarry-ai/tantalum/releases/download/v${VERSION}/tantalum-gateway-${ARCH}"
+
+mkdir -p "$GATEWAY_DIR"
+
+if curl -L -o "$GATEWAY_BIN" "$DOWNLOAD_URL"; then
+    chmod +x "$GATEWAY_BIN"
+    success "Gateway binary downloaded for ${ARCH}"
+else
+    echo
+    error "Failed to download gateway binary from GitHub Releases.\n  URL: $DOWNLOAD_URL\n  Please check your internet connection or if the release exists."
+fi
 
 # ---------------------------------------------------------------------------
 # Docker Configuration
