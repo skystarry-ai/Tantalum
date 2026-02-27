@@ -385,6 +385,30 @@ def search_tools(
 # Tool Executor
 # ---------------------------------------------------------------------------
 
+def validate_storage_path(raw_path: str) -> str:
+    """
+    Validate that the path is within /storage and return the absolute path inside the container.
+    Prevents Path Traversal attacks.
+
+    Args:
+        raw_path: The user-provided path string.
+
+    Returns:
+        The normalized absolute path starting with /storage.
+
+    Raises:
+        ValueError: If the path attempts to traverse outside /storage.
+    """
+    # 1. Normalize path (resolve .. and .)
+    clean_path = os.path.normpath(f"/storage/{raw_path.lstrip('/')}")
+
+    # 2. Ensure path starts with /storage
+    if not clean_path.startswith("/storage"):
+        raise ValueError("Access denied: Path must be within /storage")
+
+    return clean_path
+
+
 def execute_tool(name: str, arguments: str, cfg: BrainConfig) -> str:
     """
     Parse arguments and execute the specified tool inside a container.
@@ -410,29 +434,45 @@ def execute_tool(name: str, arguments: str, cfg: BrainConfig) -> str:
             output = run_in_session_container(["sh", "-c", command], workspace, cfg)
 
         elif name == "read_file":
-            path = args.get("path", "").lstrip("/")
-            result = subprocess.run(
-                [cfg.runtime, "exec", cfg.persistent_container, "cat", f"/storage/{path}"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            output = result.stdout or result.stderr or "(empty file)"
+            raw_path = args.get("path", "")
+            try:
+                safe_path = validate_storage_path(raw_path)
+                # Use list form for subprocess.run to prevent shell injection
+                result = subprocess.run(
+                    [cfg.runtime, "exec", cfg.persistent_container, "cat", safe_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                output = result.stdout or result.stderr or "(empty file)"
+            except ValueError as e:
+                output = str(e)
 
         elif name == "write_file":
-            path = args.get("path", "").lstrip("/")
+            raw_path = args.get("path", "")
             file_content = args.get("content", "")
-            result = subprocess.run(
-                [
-                    cfg.runtime, "exec", "-i", cfg.persistent_container, "sh", "-c",
-                    f"mkdir -p $(dirname /storage/{path}) && cat > /storage/{path}",
-                ],
-                input=file_content,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            output = f"Written to /storage/{path}" if result.returncode == 0 else result.stderr
+            try:
+                safe_path = validate_storage_path(raw_path)
+                dir_path = os.path.dirname(safe_path)
+
+                # 1. Create directory (mkdir -p)
+                subprocess.run(
+                    [cfg.runtime, "exec", cfg.persistent_container, "mkdir", "-p", dir_path],
+                    check=True,
+                    timeout=5
+                )
+
+                # 2. Write file using tee (avoids shell injection in content redirection)
+                result = subprocess.run(
+                    [cfg.runtime, "exec", "-i", cfg.persistent_container, "tee", safe_path],
+                    input=file_content,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                output = f"Written to {safe_path}" if result.returncode == 0 else result.stderr
+            except (ValueError, subprocess.CalledProcessError) as e:
+                output = f"Error: {str(e)}"
 
         else:
             output = f"Error: Unknown tool '{name}'"
