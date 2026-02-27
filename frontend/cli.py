@@ -552,7 +552,6 @@ def dispatch_slash_command(
     # --- /reload ---
     if canonical_cmd == "/reload":
         console.clear()
-        print_header()
         with Live(
             Spinner("dots", text="[cyan]Reloading config and resetting brain...[/cyan]"),
             refresh_per_second=10,
@@ -560,8 +559,10 @@ def dispatch_slash_command(
         ):
             try:
                 new_sock = restart_brain_process(sock)
+                console.clear()
+                print_header()
                 console.print(
-                    "[green]●[/green] [dim]Configuration reloaded and "
+                    "\n\n[green]●[/green] [dim]Configuration reloaded and "
                     "KV cache cleared. Session restarted.[/dim]\n"
                 )
                 return False, new_sock
