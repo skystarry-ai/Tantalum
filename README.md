@@ -82,7 +82,7 @@ This enforces:
 git clone https://github.com/skystarry-ai/tantalum.git
 cd tantalum
 bash install.sh
-pip install .
+pipx install --include-deps .
 ```
 
 `install.sh` handles:
@@ -101,7 +101,7 @@ Builds the Zig gateway from source and installs in editable mode:
 
 ```bash
 bash install_dev.sh
-pip install -e .
+pipx install -e --include-deps .
 ```
 
 `install_dev.sh` additionally handles:
@@ -209,8 +209,6 @@ Tantalum assumes authenticated users (SPA-verified) and enforces isolation at th
 
 ```
 .
-├── AGENTS.md
-├── GEMINI.md
 ├── LICENSE
 ├── README.md
 ├── SECURITY.md
