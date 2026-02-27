@@ -10,6 +10,7 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 DIM='\033[2m'
 RESET='\033[0m'
+gateway_file="https://github.com/skystarry-ai/Tantalum/releases/latest/download/tantalum-gateway"
 
 info()    { echo -e "${CYAN}●${RESET} $1"; }
 success() { echo -e "${GREEN}✓${RESET} $1"; }
@@ -96,6 +97,10 @@ else
     pipx ensurepath
     success "Pipx installed and PATH updated for this session"
 fi
+
+info "Downloading a gateway file..."
+mkdir -p service
+wget "${gateway_file}" -o service/tantalum-gateway
 
 # ---------------------------------------------------------------------------
 # Docker Configuration
