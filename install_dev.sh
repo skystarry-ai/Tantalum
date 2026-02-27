@@ -108,9 +108,16 @@ else
     error "Python 3.11+ required (found ${PYTHON_VERSION})"
 fi
 
-info "Installing Python dependencies..."
-pip install --quiet litellm chromadb rich prompt_toolkit python-dotenv
-success "Python dependencies installed"
+info "Checking Pipx..."
+if command -v pipx &>/dev/null; then
+    success "Pipx already installed"
+else
+    info "Pipx is not installed. Installing pipx..."
+    sudo apt update -qq && sudo apt install -y -qq pipx
+    export PATH="$PATH:$HOME/.local/bin"
+    pipx ensurepath
+    success "Pipx installed and PATH updated for this session"
+fi
 
 # ---------------------------------------------------------------------------
 # Docker Configuration
@@ -187,6 +194,6 @@ echo
 echo -e "${GREEN}Tantalum installed successfully.${RESET}"
 echo
 dim "Start the CLI (it will launch gateway and brain automatically):"
-dim "Next Step: Run the command \"pip install -e .\""
+dim "Next Step: Run the command \"pipx install --include-deps -e .\""
 dim "  And run command tantalum"
 echo

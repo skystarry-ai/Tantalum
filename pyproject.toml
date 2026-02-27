@@ -7,7 +7,7 @@ name = "tantalum"
 version = "0.1.0"
 description = "Tantalum CLI and Agent"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "chromadb>=1.5.1",
     "litellm>=1.81.15",
