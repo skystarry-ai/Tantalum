@@ -10,6 +10,8 @@ const PORT = 8080;
 const BRAIN_SOCKET_PATH = "/tmp/tantalum-brain.sock";
 
 /// CMSG 구조체 헬퍼 (0.15.2 호환)
+// Reference:
+// https://github.com/tupleapp/tuple-launch/blob/master/cmsghdr.zig
 pub fn Cmsghdr(comptime T: type) type {
     const Header = extern struct {
         len: usize,
