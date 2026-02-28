@@ -9,9 +9,10 @@ const HmacSha256 = std.crypto.auth.hmac.sha2.HmacSha256;
 const PORT = 8080;
 const BRAIN_SOCKET_PATH = "/tmp/tantalum-brain.sock";
 
-/// CMSG 구조체 헬퍼 (0.15.2 호환)
+
 // Reference:
 // https://github.com/tupleapp/tuple-launch/blob/master/cmsghdr.zig
+/// CMSG structure helper (compatible with 0.15.2)
 pub fn Cmsghdr(comptime T: type) type {
     const Header = extern struct {
         len: usize,
@@ -50,12 +51,12 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // 시작 시점에 파이썬이 주입한 1회용 세션 키를 환경 변수에서 가져옴
+    // Retrieve the one-time session key injected by Python from environment variables at startup
     const shared_secret = std.process.getEnvVarOwned(allocator, "TANTALUM_SECRET") catch |err| {
         std.debug.print("Fatal: TANTALUM_SECRET environment variable not provided: {any}\n", .{err});
         return err;
     };
-    // 프로그램이 살아있는 동안 쓰레드에서 계속 참조해야 하므로 메모리를 해제(defer free)하지 않고 의도적으로 유지합니다.
+    // Intentionally keep the memory allocated (do not defer free) as it needs to be referenced by threads throughout the program's lifetime.
 
     const address = try net.Address.parseIp4("127.0.0.1", PORT);
     var server = try address.listen(.{ .reuse_address = true });
@@ -65,15 +66,15 @@ pub fn main() !void {
 
     while (true) {
         const connection = try server.accept();
-        // 쓰레드 실행 시 shared_secret도 함께 넘겨줌
+        // Pass shared_secret along when spawning the thread
         const thread = try std.Thread.spawn(.{}, handleConnection, .{ allocator, connection, shared_secret });
         thread.detach();
     }
 }
 
 fn handleConnection(allocator: std.mem.Allocator, connection: net.Server.Connection, secret: []const u8) void {
-    // FD를 브레인에 넘긴 후에는 브레인이 소켓을 직접 소유하므로 여기서 닫지 않는다.
-    // 검증 실패 또는 FD 전달 실패 시에만 닫는다.
+    // Do not close the socket here because the Brain owns it after passing the FD.
+    // Close only on verification failure or FD passing failure.
 
     var buffer: [4096]u8 = undefined;
     const bytes_read = connection.stream.read(&buffer) catch |err| {
@@ -97,7 +98,7 @@ fn handleConnection(allocator: std.mem.Allocator, connection: net.Server.Connect
             std.debug.print("Failed to pass FD: {any}\n", .{err});
             connection.stream.close();
         };
-        // FD 전달 성공 시 소켓을 닫지 않음 - 브레인이 소유권을 가짐
+        // Do not close the socket upon successful FD passing - the Brain takes ownership
     } else {
         std.debug.print("SPA Verification Failed! Dropping connection.\n", .{});
         connection.stream.close();
@@ -118,7 +119,7 @@ fn passFdToBrain(allocator: std.mem.Allocator, fd_to_pass: posix.fd_t) !void {
 
     cmsg_ptr.* = FdMessage.init(.{
         .level = posix.SOL.SOCKET,
-        .@"type" = 1, // SCM_RIGHTS (posix.SCM / linux.SCM.RIGHTS API가 0.15.2에서 미지원)
+        .@"type" = 1, // SCM_RIGHTS (posix.SCM / linux.SCM.RIGHTS API not supported in 0.15.2)
         .data = fd_to_pass,
     });
 
@@ -139,8 +140,8 @@ fn verifySpa(received_mac_slice: []const u8, payload: []const u8, secret: []cons
     var expected_mac: [HmacSha256.mac_length]u8 = undefined;
     HmacSha256.create(&expected_mac, payload, secret);
     if (received_mac_slice.len != HmacSha256.mac_length) return false;
-    // std.crypto.subtle / std.crypto.utils 모두 0.15.2에서 없음
-    // std.crypto.timing_safe.eql 사용
+    // std.crypto.subtle / std.crypto.utils are missing in 0.15.2
+    // Use std.crypto.timing_safe.eql
     return std.crypto.timing_safe.eql(
         [HmacSha256.mac_length]u8,
         expected_mac,
