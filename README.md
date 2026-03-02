@@ -111,7 +111,7 @@ pipx install -e --include-deps .
 
 `install_dev.sh` additionally handles:
 
-* Zig 0.15.2 installation (`x86_64` and `aarch64` supported)
+* Zig 0.15.2 installation (`x86_64` supported)
 * Gateway build: `backend/zig-out/bin/tantalum-gateway`
 
 ---
