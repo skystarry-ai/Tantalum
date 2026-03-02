@@ -143,11 +143,13 @@ OPENAI_API_KEY=your_key
 You can also edit this file at any time from within the CLI using the `/config` slash command.
 
 For local inference:
-
 ```bash
 ollama pull llama3.2:3b
 # then set: TANTALUM_MODEL=ollama/llama3.2:3b
 ```
+
+> [!NOTE]  
+> Local model support depends on LiteLLM's built-in compatibility. Tool calling quality may vary significantly depending on the model.
 
 ---
 
