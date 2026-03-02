@@ -1,3 +1,5 @@
+<img width="1280" height="640" alt="tantalum" src="https://github.com/user-attachments/assets/a6ec5b34-0f00-4635-b617-d09371e7461a" />
+
 # Tantalum
 
 **Security-First AI Agent Runtime**
