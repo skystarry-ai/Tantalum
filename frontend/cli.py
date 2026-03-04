@@ -355,7 +355,7 @@ def restart_brain_process(sock: socket.socket) -> socket.socket:
     load_dotenv(CONFIG_FILE, override=True)
     start_process("brain", [sys.executable, str(BRAIN_SCRIPT)])
 
-    if not wait_for_brain(60.0):
+    if not wait_for_brain():
         raise RuntimeError("Brain failed to restart.")
 
     return connect()
@@ -657,7 +657,7 @@ def main() -> None:
     with Live(Spinner("dots", text="[cyan]Starting brain...[/cyan]"), refresh_per_second=10, transient=True):
         start_process("brain", [sys.executable, str(BRAIN_SCRIPT)])
 
-        if not wait_for_brain():
+        if not wait_for_brain(60.0):
             print_error("Brain failed to start.")
             sys.exit(1)
 
