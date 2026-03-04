@@ -1,6 +1,5 @@
 from setuptools import setup, find_packages
 from setuptools.command.install import install
-from setuptools.command.install import install
 import os
 import stat
 
