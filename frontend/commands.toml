@@ -42,3 +42,11 @@ description = "Reload config and restart the brain (clears KV cache)"
 [[command]]
 name        = "/newchat"
 description = "Start a new chat session (resets conversation context)"
+
+[[command]]
+name        = "/upload"
+description = "Upload a file to persistent storage via file dialog"
+
+[[command]]
+name        = "/download"
+description = "Download a file from persistent storage via file dialog"
