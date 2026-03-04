@@ -521,6 +521,250 @@ def build_prompt_session(display_pairs: list[tuple[str, str]]) -> PromptSession:
 
 
 # ---------------------------------------------------------------------------
+# File Dialog Utilities (zenity / kdialog — selected via $XDG_CURRENT_DESKTOP)
+# ---------------------------------------------------------------------------
+
+def _get_dialog_backend() -> str:
+    """
+    Detect the appropriate GUI file-dialog backend for the running desktop.
+
+    Resolution order:
+      1. $TANTALUM_DIALOG  — explicit user override ("zenity" or "kdialog")
+      2. $XDG_CURRENT_DESKTOP — "KDE" → kdialog, anything else → zenity
+      3. Availability check via shutil.which — fallback to whichever is installed.
+
+    Raises:
+        RuntimeError: If neither zenity nor kdialog is found on PATH.
+    """
+    override = os.environ.get("TANTALUM_DIALOG", "").strip().lower()
+    if override in ("zenity", "kdialog"):
+        return override
+
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+    preferred = "kdialog" if "KDE" in desktop else "zenity"
+
+    if shutil.which(preferred):
+        return preferred
+
+    # Fallback to whichever is available.
+    fallback = "kdialog" if preferred == "zenity" else "zenity"
+    if shutil.which(fallback):
+        return fallback
+
+    raise RuntimeError(
+        "No GUI file dialog found. Install zenity (GTK) or kdialog (KDE), "
+        "or set TANTALUM_DIALOG=zenity|kdialog."
+    )
+
+
+def _open_file_dialog(title: str) -> str | None:
+    """
+    Open a GUI file-open dialog and return the selected path, or None on cancel.
+
+    Args:
+        title: Window title shown in the dialog.
+
+    Returns:
+        Absolute path string chosen by the user, or None if cancelled.
+    """
+    backend = _get_dialog_backend()
+
+    if backend == "zenity":
+        cmd = ["zenity", "--file-selection", "--title", title]
+    else:
+        cmd = ["kdialog", "--getopenfilename", str(Path.home()), "*", "--title", title]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    path = result.stdout.strip()
+    return path if result.returncode == 0 and path else None
+
+
+def _save_file_dialog(title: str, default_name: str = "") -> str | None:
+    """
+    Open a GUI file-save dialog and return the chosen destination path, or None on cancel.
+
+    Args:
+        title:        Window title shown in the dialog.
+        default_name: Suggested filename pre-filled in the dialog.
+
+    Returns:
+        Absolute path string chosen by the user, or None if cancelled.
+    """
+    backend = _get_dialog_backend()
+
+    if backend == "zenity":
+        cmd = [
+            "zenity", "--file-selection", "--save",
+            "--confirm-overwrite",
+            "--title", title,
+        ]
+        if default_name:
+            cmd += ["--filename", default_name]
+    else:
+        start = str(Path.home() / default_name) if default_name else str(Path.home())
+        cmd = ["kdialog", "--getsavefilename", start, "*", "--title", title]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    path = result.stdout.strip()
+    return path if result.returncode == 0 and path else None
+
+
+def _list_storage_dialog(container: str, runtime: str) -> str | None:
+    """
+    List files inside /storage of the persistent container and let the user
+    pick one via a GUI list dialog.
+
+    Args:
+        container: Name of the persistent container.
+        runtime:   Container runtime ("podman" or "docker").
+
+    Returns:
+        The selected filename (basename only), or None if cancelled / empty.
+    """
+    result = subprocess.run(
+        [runtime, "exec", container, "find", "/storage", "-type", "f"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        console.print("[yellow]warning[/yellow]  /storage is empty or inaccessible.")
+        return None
+
+    # Paths relative to /storage for display clarity.
+    files = [
+        line.removeprefix("/storage/").strip()
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+    backend = _get_dialog_backend()
+
+    if backend == "zenity":
+        # zenity --list requires alternating column values; single column here.
+        cmd = [
+            "zenity", "--list",
+            "--title", "Select file from storage",
+            "--column", "File",
+        ] + files
+    else:
+        # kdialog --menu expects pairs of (tag, item); use filename as both.
+        pairs: list[str] = []
+        for f in files:
+            pairs += [f, f]
+        cmd = ["kdialog", "--menu", "Select file from storage"] + pairs
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    selection = result.stdout.strip()
+    return selection if result.returncode == 0 and selection else None
+
+
+# ---------------------------------------------------------------------------
+# Upload / Download Helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_runtime() -> str:
+    """Read the container runtime from env, matching BrainConfig defaults."""
+    return os.environ.get("TANTALUM_RUNTIME") or (
+        "podman" if shutil.which("podman") else "docker"
+    )
+
+
+def _resolve_container() -> str:
+    """Read the persistent container name from env, matching BrainConfig defaults."""
+    return os.environ.get("TANTALUM_PERSISTENT_CONTAINER", "tantalum-persistent")
+
+
+def handle_upload() -> None:
+    """
+    Open a file-open dialog, then copy the chosen file into /storage inside
+    the persistent container via ``docker/podman cp``.
+    """
+    try:
+        src = _open_file_dialog("Upload file to Tantalum storage")
+    except RuntimeError as exc:
+        print_error(str(exc))
+        return
+
+    if src is None:
+        console.print("[dim]Upload cancelled.[/dim]")
+        return
+
+    src_path = Path(src)
+    if not src_path.exists():
+        print_error(f"File not found: {src}")
+        return
+
+    container = _resolve_container()
+    runtime = _resolve_runtime()
+    dest = f"{container}:/storage/{src_path.name}"
+
+    with console.status(f"[cyan]Uploading {src_path.name}...[/cyan]", spinner="dots"):
+        result = subprocess.run(
+            [runtime, "cp", str(src_path), dest],
+            capture_output=True,
+            text=True,
+        )
+
+    if result.returncode == 0:
+        console.print(
+            f"[green]●[/green] [dim]Uploaded [bold]{src_path.name}[/bold] "
+            f"→ /storage/{src_path.name}[/dim]\n"
+        )
+    else:
+        print_error(f"Upload failed: {result.stderr.strip()}")
+
+
+def handle_download() -> None:
+    """
+    Show a list of files in /storage, open a file-save dialog for the
+    destination, then copy the file out via ``docker/podman cp``.
+    """
+    container = _resolve_container()
+    runtime = _resolve_runtime()
+
+    try:
+        selected = _list_storage_dialog(container, runtime)
+    except RuntimeError as exc:
+        print_error(str(exc))
+        return
+
+    if selected is None:
+        console.print("[dim]Download cancelled.[/dim]")
+        return
+
+    try:
+        dest = _save_file_dialog(
+            title=f"Save {selected} to…",
+            default_name=selected,
+        )
+    except RuntimeError as exc:
+        print_error(str(exc))
+        return
+
+    if dest is None:
+        console.print("[dim]Download cancelled.[/dim]")
+        return
+
+    src = f"{container}:/storage/{selected}"
+
+    with console.status(f"[cyan]Downloading {selected}...[/cyan]", spinner="dots"):
+        result = subprocess.run(
+            [runtime, "cp", src, dest],
+            capture_output=True,
+            text=True,
+        )
+
+    if result.returncode == 0:
+        console.print(
+            f"[green]●[/green] [dim]Downloaded [bold]{selected}[/bold] "
+            f"→ {dest}[/dim]\n"
+        )
+    else:
+        print_error(f"Download failed: {result.stderr.strip()}")
+
+
+# ---------------------------------------------------------------------------
 # Command Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -608,6 +852,16 @@ def dispatch_slash_command(
                 print_error(f"Failed to reset session: {exc}")
         return False, None
 
+    # --- /upload ---
+    if canonical_cmd == "/upload":
+        handle_upload()
+        return False, None
+
+    # --- /download ---
+    if canonical_cmd == "/download":
+        handle_download()
+        return False, None
+
     # Defensive fallthrough — command is valid but has no registered handler
     console.print(f"[dim]No handler registered for '{canonical_cmd}'.[/dim]")
     return False, None
@@ -634,16 +888,49 @@ def main() -> None:
 
     # --- 1. Start Gateway Process ---
     with Live(Spinner("dots", text="[cyan]Starting gateway...[/cyan]"), refresh_per_second=10, transient=True):
-        actual_bin = GATEWAY_BIN_REL if GATEWAY_BIN_REL.exists() else GATEWAY_BIN_DEV
+        def _is_executable(p: Path) -> bool:
+            """Return True only when *p* exists and the OS can execute it."""
+            return p.exists() and os.access(p, os.X_OK)
 
-        if not actual_bin.exists():
-            if shutil.which("zig"):
-                console.print("[yellow]warning[/yellow]  Gateway binary not found, building from source...")
-                subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe"], cwd=ROOT_DIR / "backend", check=True)
-                actual_bin = GATEWAY_BIN_DEV
-            else:
-                print_error("Tantalum Gateway binary not found and Zig is not installed.")
-                sys.exit(1)
+        if _is_executable(GATEWAY_BIN_REL):
+            actual_bin = GATEWAY_BIN_REL
+        elif _is_executable(GATEWAY_BIN_DEV):
+            actual_bin = GATEWAY_BIN_DEV
+        else:
+            # Neither pre-built binary is runnable — try to compile from source.
+            actual_bin = GATEWAY_BIN_DEV  # target path after build
+
+            # Ensure the release binary has its execute bit set if it was
+            # installed as package data but lost its permission bits.
+            for candidate in (GATEWAY_BIN_REL, GATEWAY_BIN_DEV):
+                if candidate.exists() and not os.access(candidate, os.X_OK):
+                    console.print(
+                        f"[yellow]warning[/yellow]  {candidate.name} exists but is not "
+                        "executable — fixing permissions."
+                    )
+                    candidate.chmod(candidate.stat().st_mode | 0o111)
+                    if _is_executable(candidate):
+                        actual_bin = candidate
+                        break
+
+            # If still not executable, fall back to building from source.
+            if not _is_executable(actual_bin):
+                if shutil.which("zig"):
+                    console.print(
+                        "[yellow]warning[/yellow]  Gateway binary not found, building from source..."
+                    )
+                    subprocess.run(
+                        ["zig", "build", "-Doptimize=ReleaseSafe"],
+                        cwd=ROOT_DIR / "backend",
+                        check=True,
+                    )
+                    actual_bin = GATEWAY_BIN_DEV
+                else:
+                    print_error(
+                        "Tantalum Gateway binary not found and Zig is not installed.\n"
+                        "  Install Zig to build from source, or ship a pre-built binary."
+                    )
+                    sys.exit(1)
 
         start_process("gateway", [str(actual_bin)], env={"TANTALUM_SECRET": SESSION_SECRET})
 
@@ -657,7 +944,7 @@ def main() -> None:
     with Live(Spinner("dots", text="[cyan]Starting brain...[/cyan]"), refresh_per_second=10, transient=True):
         start_process("brain", [sys.executable, str(BRAIN_SCRIPT)])
 
-        if not wait_for_brain(60.0):
+        if not wait_for_brain():
             print_error("Brain failed to start.")
             sys.exit(1)
 
