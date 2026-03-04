@@ -11,7 +11,7 @@ RED='\033[0;31m'
 DIM='\033[2m'
 RESET='\033[0m'
 
-VERSION="0.1.0"
+VERSION="0.2.0a"
 
 info()    { echo -e "${CYAN}●${RESET} $1"; }
 success() { echo -e "${GREEN}✓${RESET} $1"; }
@@ -106,7 +106,7 @@ info "Downloading Tantalum Gateway v${VERSION}..."
 
 GATEWAY_DIR="service"
 GATEWAY_BIN="${GATEWAY_DIR}/tantalum-gateway"
-DOWNLOAD_URL="https://github.com/skystarry-ai/tantalum/releases/download/${VERSION}/tantalum-gateway"
+DOWNLOAD_URL="https://github.com/skystarry-ai/tantalum/releases/download/v${VERSION}/tantalum-gateway"
 
 mkdir -p "$GATEWAY_DIR"
 
