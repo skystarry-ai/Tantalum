@@ -47,9 +47,9 @@ from rich.panel import Panel
 from rich.spinner import Spinner
 
 # Check for Linux-based OS compatibility
-if sys.platform == "win32":
+if sys.platform != "linux":
     print("Error: Tantalum is designed for Linux-based systems (including WSL2).")
-    print("Windows native execution is not supported due to security architecture.")
+    print("Windows or MacOS native execution is not supported due to security architecture.")
     sys.exit(1)
 
 
