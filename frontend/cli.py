@@ -29,6 +29,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 import tomllib
 from importlib.resources import files as _res_files
@@ -47,7 +48,7 @@ from rich.panel import Panel
 from rich.spinner import Spinner
 
 # Check for Linux-based OS compatibility
-if sys.platform == "win32":
+if sys.platform != "linux":
     print("Error: Tantalum is designed for Linux-based systems (including WSL2).")
     print("Windows native execution is not supported due to security architecture.")
     sys.exit(1)
@@ -379,13 +380,24 @@ def connect() -> socket.socket:
 
 
 
-def send_message(sock: socket.socket, message: str) -> dict:
+def send_message(
+    sock: socket.socket,
+    message: str,
+    on_tool_start: "Callable[[str, int | None], None] | None" = None,
+) -> dict:
     """
     Send a message over the socket and receive the JSON response stream.
 
+    Intermediate ``tool_start`` events emitted by the Brain are forwarded to
+    *on_tool_start* so the caller can update its status display in real time.
+    The function blocks until a message with ``"done": true`` arrives.
+
     Args:
-        sock:    The connected socket instance.
-        message: The user's input string.
+        sock:          The connected socket instance.
+        message:       The user's input string.
+        on_tool_start: Optional callback invoked whenever the Brain begins a
+                       tool execution.  Receives the tool name and an optional
+                       loop iteration index (``None`` for non-loop calls).
 
     Returns:
         The parsed JSON dictionary of the final response.
@@ -405,6 +417,16 @@ def send_message(sock: socket.socket, message: str) -> dict:
             if not line:
                 continue
             msg = json.loads(line.decode("utf-8"))
+
+            # Intermediate event: Brain has started executing a tool.
+            if msg.get("event") == "tool_start":
+                if on_tool_start is not None:
+                    on_tool_start(
+                        msg.get("tool", "unknown"),
+                        msg.get("loop_iter"),  # None when not in a loop
+                    )
+                continue
+
             if msg.get("done"):
                 return msg
     return {}
@@ -635,7 +657,7 @@ def main() -> None:
     with Live(Spinner("dots", text="[cyan]Starting brain...[/cyan]"), refresh_per_second=10, transient=True):
         start_process("brain", [sys.executable, str(BRAIN_SCRIPT)])
 
-        if not wait_for_brain():
+        if not wait_for_brain(60.0):
             print_error("Brain failed to start.")
             sys.exit(1)
 
@@ -692,18 +714,41 @@ def main() -> None:
             # ---------------------------------------------------------------
             print_user(user_input)
 
-            with Live(
-                Spinner("dots", text="[cyan]thinking...[/cyan]"),
-                refresh_per_second=10,
-                transient=True,
-            ):
+            # Build a mutable status label updated in real time as the Brain
+            # emits tool_start events during its agentic loop.
+            _status_label: list[str] = ["[cyan]thinking...[/cyan]"]
+
+            def _on_tool_start(tool_name: str, loop_iter: int | None) -> None:
+                """Update the spinner text when the Brain starts a new tool."""
+                if loop_iter is not None:
+                    label = (
+                        f"[cyan]using tool [bold]{tool_name}[/bold] "
+                        f"(loop {loop_iter})[/cyan]"
+                    )
+                else:
+                    label = f"[cyan]using tool [bold]{tool_name}[/bold][/cyan]"
+                _status_label[0] = label
+                # Push the new label to the live display.
+                if _live_status[0] is not None:
+                    _live_status[0].update(label)
+
+            # _live_status holds a reference so _on_tool_start can reach it.
+            _live_status: list = [None]
+
+            with console.status(
+                _status_label[0],
+                spinner="dots",
+            ) as status:
+                _live_status[0] = status
                 try:
-                    reply = send_message(sock, user_input)
+                    reply = send_message(sock, user_input, on_tool_start=_on_tool_start)
                 except Exception as exc:
                     print_error(f"Send failed: {exc}")
                     try:
                         sock = connect()
-                        reply = send_message(sock, user_input)
+                        reply = send_message(
+                            sock, user_input, on_tool_start=_on_tool_start
+                        )
                     except Exception as exc2:
                         print_error(f"Reconnect failed: {exc2}")
                         continue

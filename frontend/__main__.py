@@ -220,11 +220,29 @@ TOOL_REGISTRY: list[dict] = [
     },
     {
         "name": "run_shell",
-        "description": "Execute a shell command in an isolated Docker container.",
+        "description": (
+            "Execute a shell command in an isolated Docker container. "
+            "Set loop=true when the command needs to be repeated until it "
+            "succeeds or produces no more output — e.g. iterative grep/sed "
+            "passes over a file. The agent will keep calling this tool in a "
+            "loop as long as you return loop=true."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "Shell command to execute"}
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute.",
+                },
+                "loop": {
+                    "type": "boolean",
+                    "description": (
+                        "When true, signals the agent runtime to keep invoking "
+                        "this tool call in a loop until the model sets loop=false "
+                        "or omits it. Use for iterative operations such as "
+                        "grep/sed passes that must run multiple times."
+                    ),
+                },
             },
             "required": ["command"],
         },
@@ -543,50 +561,167 @@ def build_system_message(cfg: BrainConfig) -> dict:
 # LLM Integration
 # ---------------------------------------------------------------------------
 
+_MAX_AGENT_ITERATIONS = 32  # Hard cap to prevent runaway loops
+
+
 def call_llm_with_tools(
     messages: list[dict],
     tools: list[dict],
     cfg: BrainConfig,
+    conn: socket.socket | None = None,
 ) -> str:
     """
-    Call the LLM via LiteLLM, handle tool calls, and return the final response.
+    Run the agentic tool-use loop via LiteLLM and return the final response.
+
+    The loop continues as long as the model emits tool calls.  For the
+    ``run_shell`` tool, the model may include a ``loop`` boolean argument.
+    When ``loop=true``, the runtime re-executes the *same* tool call (with
+    the same arguments) and feeds the new output back, repeating until the
+    model either stops requesting it or _MAX_AGENT_ITERATIONS is reached.
+
+    If *conn* is provided, a lightweight JSON event is written to the socket
+    before each tool execution so the CLI can display which tool is active::
+
+        {"event": "tool_start", "tool": "<tool_name>"}
 
     Args:
         messages: Full message list (system message + conversation history).
         tools:    Relevant tool registry entries for this turn.
         cfg:      Active BrainConfig instance.
+        conn:     Optional connected client socket for streaming tool events.
 
     Returns:
         The final assistant response string.
     """
     litellm_tools = build_tools_for_request(tools, cfg) if tools else None
-
-    response = litellm.completion(model=cfg.model, messages=messages, tools=litellm_tools)
-    msg = response.choices[0].message
-
-    if not msg.tool_calls:
-        return msg.content or "(no response)"
-
     valid_tool_names = {t["name"] for t in tools}
 
-    # Fallback to plain completion if the model hallucinates an invalid tool name
-    if any(tc.function.name not in valid_tool_names for tc in msg.tool_calls):
-        fallback = litellm.completion(model=cfg.model, messages=messages)
-        return fallback.choices[0].message.content or "(no response)"
+    for iteration in range(_MAX_AGENT_ITERATIONS):
+        response = litellm.completion(
+            model=cfg.model,
+            messages=messages,
+            tools=litellm_tools,
+        )
+        msg = response.choices[0].message
 
-    messages.append(msg)
+        # No tool calls — model produced a final answer.
+        if not msg.tool_calls:
+            return msg.content or "(no response)"
 
-    # Execute all tools requested by the LLM
-    for tool_call in msg.tool_calls:
-        result = execute_tool(tool_call.function.name, tool_call.function.arguments, cfg)
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": result,
-        })
+        # Guard against hallucinated tool names before appending to history.
+        if any(tc.function.name not in valid_tool_names for tc in msg.tool_calls):
+            fallback = litellm.completion(model=cfg.model, messages=messages)
+            return fallback.choices[0].message.content or "(no response)"
 
-    # Final synthesis after tool results are appended
-    final = litellm.completion(model=cfg.model, messages=messages, tools=litellm_tools)
+        messages.append(msg)
+
+        # Execute every tool the model requested in this turn.
+        for tool_call in msg.tool_calls:
+            tool_name = tool_call.function.name
+
+            # Notify the CLI which tool is running so it can update its UI.
+            if conn is not None:
+                try:
+                    write_jsonl(conn, {"event": "tool_start", "tool": tool_name})
+                except OSError:
+                    pass  # Tolerate a broken pipe; the reply will still arrive.
+
+            # Parse arguments once; we may need them for loop repetition.
+            try:
+                args = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
+                args = {}
+
+            result = execute_tool(tool_name, tool_call.function.arguments, cfg)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result,
+            })
+
+            # --- Loop extension for run_shell ---
+            # When the model sets loop=true we repeat the identical command,
+            # appending successive outputs, until the flag is absent/false or
+            # the iteration cap is reached.
+            if tool_name == "run_shell" and args.get("loop", False):
+                loop_iter = 0
+                max_loop = _MAX_AGENT_ITERATIONS
+
+                while loop_iter < max_loop:
+                    loop_iter += 1
+                    print(
+                        f"[Brain] run_shell loop iteration {loop_iter} "
+                        f"(command: {args.get('command', '')!r})"
+                    )
+
+                    if conn is not None:
+                        try:
+                            write_jsonl(
+                                conn,
+                                {
+                                    "event": "tool_start",
+                                    "tool": tool_name,
+                                    "loop_iter": loop_iter,
+                                },
+                            )
+                        except OSError:
+                            pass
+
+                    loop_result = execute_tool(
+                        tool_name, tool_call.function.arguments, cfg
+                    )
+
+                    # Feed the loop output back as a synthetic tool-result so
+                    # the model can decide whether to continue or stop.
+                    loop_check_messages = messages + [
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id + f"_loop{loop_iter}",
+                            "content": loop_result,
+                        }
+                    ]
+
+                    # Ask the model whether to keep looping.
+                    loop_response = litellm.completion(
+                        model=cfg.model,
+                        messages=loop_check_messages,
+                        tools=litellm_tools,
+                    )
+                    loop_msg = loop_response.choices[0].message
+
+                    # If the model returns plain text it has decided to stop.
+                    if not loop_msg.tool_calls:
+                        messages.extend(loop_check_messages[len(messages):])
+                        messages.append(loop_msg)
+                        return loop_msg.content or "(no response)"
+
+                    # Check if the continued tool call still requests looping.
+                    next_args_raw = loop_msg.tool_calls[0].function.arguments
+                    try:
+                        next_args = json.loads(next_args_raw)
+                    except json.JSONDecodeError:
+                        next_args = {}
+
+                    messages.extend(loop_check_messages[len(messages):])
+                    messages.append(loop_msg)
+
+                    # Persist the loop result as a proper tool message.
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": loop_msg.tool_calls[0].id,
+                        "content": loop_result,
+                    })
+
+                    if not next_args.get("loop", False):
+                        break
+
+                    # Update args for next iteration.
+                    args = next_args
+                    tool_call = loop_msg.tool_calls[0]
+
+    # Iteration cap reached — perform a final synthesis pass.
+    print(f"[Brain] Agent loop reached iteration cap ({_MAX_AGENT_ITERATIONS}).")
+    final = litellm.completion(model=cfg.model, messages=messages)
     return final.choices[0].message.content or "(no response)"
 
 
@@ -699,7 +834,7 @@ def handle_session(
             relevant_tools = search_tools(tool_collection, content, cfg)
             messages = [system_msg] + history
 
-            response_text = call_llm_with_tools(messages, relevant_tools, cfg)
+            response_text = call_llm_with_tools(messages, relevant_tools, cfg, conn=conn)
             history.append({"role": "assistant", "content": response_text})
 
             write_jsonl(conn, {"role": "assistant", "content": response_text, "done": True})

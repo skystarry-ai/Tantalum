@@ -106,7 +106,7 @@ info "Downloading Tantalum Gateway v${VERSION}..."
 
 GATEWAY_DIR="service"
 GATEWAY_BIN="${GATEWAY_DIR}/tantalum-gateway"
-DOWNLOAD_URL="https://github.com/skystarry-ai/tantalum/releases/download/v${VERSION}/tantalum-gateway-${ARCH}"
+DOWNLOAD_URL="https://github.com/skystarry-ai/tantalum/releases/download/${VERSION}/tantalum-gateway"
 
 mkdir -p "$GATEWAY_DIR"
 
